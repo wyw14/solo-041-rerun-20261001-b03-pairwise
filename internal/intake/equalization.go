@@ -79,6 +79,21 @@ func (p *EqualizationPool) Release(lineID model.LineID) {
 	}
 }
 
+// Restore re-assigns a basin to a line exactly as captured by a committed
+// event during replay. It never re-runs capacity allocation.
+func (p *EqualizationPool) Restore(basinID string, lineID model.LineID, flow float64, at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	basin, ok := p.basins[basinID]
+	if !ok {
+		return
+	}
+	basin.LineID = lineID
+	basin.AssignedFlow = flow
+	basin.AssignedAt = at.UTC()
+	p.basins[basinID] = basin
+}
+
 func (p *EqualizationPool) Snapshot() []Equalizer {
 	p.mu.Lock()
 	defer p.mu.Unlock()

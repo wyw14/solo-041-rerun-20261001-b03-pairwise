@@ -171,7 +171,8 @@ func NewPlant(dataDir string, lines []model.LineID, now func() time.Time) (*Plan
 
 func (p *Plant) StartBatch(ctx context.Context, lineID model.LineID, flow float64, source string) (model.Batch, error) {
 	now := p.now()
-	if _, err := p.intake.Admit(ctx, lineID, flow, source, now); err != nil {
+	admission, err := p.intake.Admit(ctx, lineID, flow, source, now)
+	if err != nil {
 		return model.Batch{}, err
 	}
 	p.mu.Lock()
@@ -183,18 +184,65 @@ func (p *Plant) StartBatch(ctx context.Context, lineID model.LineID, flow float6
 	p.batches[batch.ID] = batch
 	p.lineBatches[lineID] = batch.ID
 	state := p.lines[lineID]
+	state.Stage = batch.Stage
 	state.BatchID = batch.ID.String()
 	state.UpdatedAt = now.UTC()
 	p.lines[lineID] = state
 	p.mu.Unlock()
-	event, err := model.NewEvent(lineID, batch.Generation, model.EventBatchCreated, batch, now)
+
+	started := model.BatchStarted{
+		Batch:       batch,
+		FlowM3Hour:  admission.FlowM3Hour,
+		Source:      admission.Source,
+		EqualizerID: admission.EqualizerID,
+		AcceptedAt:  admission.AcceptedAt,
+	}
+	event, err := model.NewEvent(lineID, batch.Generation, model.EventBatchCreated, started, now)
 	if err != nil {
+		p.rollbackBatch(lineID, batch.ID)
+		p.relinquishIntake(lineID)
 		return model.Batch{}, err
 	}
-	if _, err := p.store.Append(ctx, event); err != nil {
+	persisted, err := p.store.Append(ctx, event)
+	if err != nil {
+		p.rollbackBatch(lineID, batch.ID)
+		p.relinquishIntake(lineID)
 		return model.Batch{}, err
 	}
+	p.stampEvent(lineID, persisted.Sequence, now)
 	return batch, nil
+}
+
+// relinquishIntake releases intake resources reserved by a batch that failed
+// to commit.
+func (p *Plant) relinquishIntake(lineID model.LineID) {
+	p.intake.Clear(lineID)
+	p.equalizers.Release(lineID)
+}
+
+// rollbackBatch undoes a reserved batch when its event fails to commit.
+func (p *Plant) rollbackBatch(lineID model.LineID, batchID uuid.UUID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if current, ok := p.lineBatches[lineID]; ok && current == batchID {
+		delete(p.lineBatches, lineID)
+	}
+	delete(p.batches, batchID)
+	state := p.lines[lineID]
+	if state.BatchID == batchID.String() {
+		state.BatchID = ""
+	}
+	p.lines[lineID] = state
+}
+
+// stampEvent records the latest committed event sequence for a line.
+func (p *Plant) stampEvent(lineID model.LineID, sequence uint64, now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	state := p.lines[lineID]
+	state.LastEventSeq = sequence
+	state.UpdatedAt = now.UTC()
+	p.lines[lineID] = state
 }
 
 func (p *Plant) AdvanceBatch(ctx context.Context, lineID model.LineID, next model.ProcessStage) (model.Batch, error) {
@@ -211,16 +259,20 @@ func (p *Plant) AdvanceBatch(ctx context.Context, lineID model.LineID, next mode
 	if err != nil {
 		return model.Batch{}, err
 	}
-	if _, err := p.store.Append(ctx, event); err != nil {
+	persisted, err := p.store.Append(ctx, event)
+	if err != nil {
 		return model.Batch{}, err
 	}
 	p.mu.Lock()
 	p.batches[updated.ID] = updated
+	p.lineBatches[lineID] = updated.ID
 	state := p.lines[lineID]
 	state.Stage = updated.Stage
+	state.BatchID = updated.ID.String()
 	state.UpdatedAt = now.UTC()
 	p.lines[lineID] = state
 	p.mu.Unlock()
+	p.stampEvent(lineID, persisted.Sequence, now)
 	return updated, nil
 }
 

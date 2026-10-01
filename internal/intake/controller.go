@@ -74,3 +74,21 @@ func (c *Controller) Current(lineID model.LineID) (Admission, bool) {
 	value, ok := c.admissions[lineID]
 	return value, ok
 }
+
+// Restore re-establishes an admission captured by a committed event during
+// replay without re-validating intake capacity.
+func (c *Controller) Restore(admission Admission) {
+	if admission.LineID == "" {
+		return
+	}
+	c.mu.Lock()
+	c.admissions[admission.LineID] = admission
+	c.mu.Unlock()
+}
+
+// Clear drops any restored admission for a line before re-projection.
+func (c *Controller) Clear(lineID model.LineID) {
+	c.mu.Lock()
+	delete(c.admissions, lineID)
+	c.mu.Unlock()
+}

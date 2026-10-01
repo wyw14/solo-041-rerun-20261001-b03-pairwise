@@ -27,6 +27,16 @@ func NewBatch(lineID LineID, now time.Time) Batch {
 	}
 }
 
+// BatchStarted is the payload of EventBatchCreated. It carries the intake
+// admission so that resource occupancy can be rebuilt during replay.
+type BatchStarted struct {
+	Batch       Batch     `json:"batch"`
+	FlowM3Hour  float64   `json:"flow_m3_hour,omitempty"`
+	Source      string    `json:"source,omitempty"`
+	EqualizerID string    `json:"equalizer_id,omitempty"`
+	AcceptedAt  time.Time `json:"accepted_at,omitempty"`
+}
+
 func (b Batch) Move(next ProcessStage, now time.Time) (Batch, error) {
 	state := LineState{ID: b.LineID, Stage: b.Stage, Generation: b.Generation}
 	advanced, err := state.Advance(next, now)

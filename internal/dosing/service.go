@@ -55,3 +55,15 @@ func (s *Service) ChangeRate(ctx context.Context, change Change, now time.Time) 
 func (s *Service) Latest(batchID uuid.UUID) (Change, bool) {
 	return s.ledger.Latest(batchID)
 }
+
+// Restore re-applies a dosing change captured by a committed event during
+// replay. It rebuilds the ledger only and never re-publishes a device
+// command, so replay is side-effect free.
+func (s *Service) Restore(change Change) {
+	s.ledger.Restore(change)
+}
+
+// ClearLine drops restored dosing changes for a line before re-projection.
+func (s *Service) ClearLine(lineID model.LineID) {
+	s.ledger.ClearLine(lineID)
+}
