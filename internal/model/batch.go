@@ -64,3 +64,19 @@ func (b Batch) ApplyQualification(result LabResult, now time.Time) (Batch, error
 func (b Batch) IsActive() bool {
 	return b.Stage != StageClosed && b.Stage != StageIsolated
 }
+
+// IntakeAdmission is the persisted part of an intake admission: it lets
+// recovery rebuild the equalizer assignment without re-admitting flow.
+type IntakeAdmission struct {
+	FlowM3Hour  float64 `json:"flow_m3_hour"`
+	Source      string  `json:"source"`
+	EqualizerID string  `json:"equalizer_id"`
+}
+
+// BatchCreated is the payload of EventBatchCreated: the new batch together
+// with the intake admission that opened it, so recovery can rebuild the
+// equalizer assignment without re-admitting flow.
+type BatchCreated struct {
+	Batch     Batch           `json:"batch"`
+	Admission IntakeAdmission `json:"admission"`
+}

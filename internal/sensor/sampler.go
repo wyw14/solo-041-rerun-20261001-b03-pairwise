@@ -64,3 +64,29 @@ func (s *Sampler) LineSnapshot(lineID model.LineID) []model.Sample {
 	sort.Slice(result, func(i, j int) bool { return result[i].Kind < result[j].Kind })
 	return result
 }
+
+// Restore inserts a sample from the committed event log. Listeners are not
+// invoked: recovery reconstructs the latest-value cache only.
+func (s *Sampler) Restore(sample model.Sample) {
+	if sample.LineID == "" || sample.Kind == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	byKind := s.latest[sample.LineID]
+	if byKind == nil {
+		byKind = make(map[model.SampleKind]model.Sample)
+		s.latest[sample.LineID] = byKind
+	}
+	if previous, exists := byKind[sample.Kind]; exists && sample.Sequence <= previous.Sequence {
+		return
+	}
+	byKind[sample.Kind] = sample
+}
+
+// ResetLine clears the cached samples for a line so recovery can rebuild them.
+func (s *Sampler) ResetLine(lineID model.LineID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.latest, lineID)
+}

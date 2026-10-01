@@ -26,17 +26,21 @@ func NewSnapshotStore(dir string) (*SnapshotStore, error) {
 	return &SnapshotStore{dir: dir}, nil
 }
 
-func (s *SnapshotStore) Save(state model.LineState) error {
-	if state.ID == "" {
+// Save atomically persists a snapshot value for the line. The value must
+// contain the committed event sequence it was built from; callers only save
+// after events have been appended, so a snapshot can lag the journal but can
+// never lead it.
+func (s *SnapshotStore) Save(lineID model.LineID, value any) error {
+	if lineID == "" {
 		return errors.New("snapshot line is required")
 	}
-	data, err := json.MarshalIndent(state, "", "  ")
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	path := filepath.Join(s.dir, string(state.ID)+".json")
+	path := filepath.Join(s.dir, string(lineID)+".json")
 	temporary := path + ".next"
 	if err := os.WriteFile(temporary, append(data, '\n'), 0o640); err != nil {
 		return err
@@ -44,20 +48,21 @@ func (s *SnapshotStore) Save(state model.LineState) error {
 	return os.Rename(temporary, path)
 }
 
-func (s *SnapshotStore) Load(lineID model.LineID) (model.LineState, bool, error) {
+// Load decodes the line snapshot into target. A missing snapshot is reported
+// as found=false and target is left untouched.
+func (s *SnapshotStore) Load(lineID model.LineID, target any) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := filepath.Join(s.dir, string(lineID)+".json")
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return model.LineState{}, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return model.LineState{}, false, err
+		return false, err
 	}
-	var state model.LineState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return model.LineState{}, false, fmt.Errorf("decode line snapshot: %w", err)
+	if err := json.Unmarshal(data, target); err != nil {
+		return false, fmt.Errorf("decode line snapshot: %w", err)
 	}
-	return state, true, nil
+	return true, nil
 }

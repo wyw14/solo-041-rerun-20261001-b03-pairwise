@@ -23,17 +23,33 @@ func (p *Plant) SubmitAeration(ctx context.Context, lineID model.LineID, basinID
 }
 
 func (p *Plant) ChangeDose(ctx context.Context, lineID model.LineID, batchID uuid.UUID, chemical string, rate float64) (model.DeviceCommand, error) {
+	p.recoveryMu.RLock()
+	defer p.recoveryMu.RUnlock()
 	p.mu.RLock()
 	state, ok := p.lines[lineID]
+	batch, hasBatch := p.batches[batchID]
 	p.mu.RUnlock()
 	if !ok || state.Emergency {
 		return model.DeviceCommand{}, errors.New("process line cannot change dosing")
+	}
+	if !hasBatch || batch.LineID != lineID || !batch.IsActive() {
+		return model.DeviceCommand{}, errors.New("dosing batch is not active on this line")
 	}
 	change, err := dosing.NewChange(lineID, batchID, chemical, rate, state.Generation, p.now())
 	if err != nil {
 		return model.DeviceCommand{}, err
 	}
-	return p.dosing.ChangeRate(ctx, change, p.now())
+	command, persisted, err := p.dosing.ChangeRate(ctx, change, p.now())
+	if err != nil {
+		return model.DeviceCommand{}, err
+	}
+	p.mu.Lock()
+	line := p.lines[lineID]
+	line.LastEventSeq = persisted.Sequence
+	line.UpdatedAt = persisted.OccurredAt
+	p.lines[lineID] = line
+	p.mu.Unlock()
+	return command, nil
 }
 
 func (p *Plant) UpdateBlanket(lineID model.LineID, level float64) (settling.Snapshot, error) {
@@ -45,10 +61,26 @@ func (p *Plant) UpdateBlanket(lineID model.LineID, level float64) (settling.Snap
 }
 
 func (p *Plant) ReceiveSample(ctx context.Context, sample model.Sample) error {
-	if err := p.receiver.Receive(ctx, sample, p.now()); err != nil {
+	p.recoveryMu.RLock()
+	defer p.recoveryMu.RUnlock()
+	persisted, err := p.receiver.Receive(ctx, sample, p.now())
+	if err != nil {
 		return err
 	}
-	return p.sampler.Publish(sample)
+	if err := p.sampler.Publish(sample); err != nil {
+		return err
+	}
+	if persisted.Sequence != 0 {
+		p.mu.Lock()
+		line, ok := p.lines[sample.LineID]
+		if ok {
+			line.LastEventSeq = persisted.Sequence
+			line.UpdatedAt = persisted.OccurredAt
+			p.lines[sample.LineID] = line
+		}
+		p.mu.Unlock()
+	}
+	return nil
 }
 
 func (p *Plant) BeginSettling(lineID model.LineID) (settling.Cycle, error) {

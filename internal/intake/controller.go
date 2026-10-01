@@ -74,3 +74,23 @@ func (c *Controller) Current(lineID model.LineID) (Admission, bool) {
 	value, ok := c.admissions[lineID]
 	return value, ok
 }
+
+// Restore rebuilds an admission and its equalizer assignment from a committed
+// event. It never re-admits flow or re-allocates a basin.
+func (c *Controller) Restore(lineID model.LineID, admission Admission) error {
+	if lineID == "" || admission.EqualizerID == "" {
+		return errors.New("admission recovery data is incomplete")
+	}
+	c.mu.Lock()
+	c.admissions[lineID] = admission
+	c.mu.Unlock()
+	return c.equalizers.Restore(admission.EqualizerID, lineID, admission.FlowM3Hour, admission.AcceptedAt)
+}
+
+// Clear drops any restored admission for a line (used when its batch has
+// released the intake resources).
+func (c *Controller) Clear(lineID model.LineID) {
+	c.mu.Lock()
+	delete(c.admissions, lineID)
+	c.mu.Unlock()
+}

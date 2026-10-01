@@ -80,3 +80,17 @@ func (s *Server) lineStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, status)
 }
+
+func (s *Server) recoverLine(w http.ResponseWriter, r *http.Request) {
+	lineID, err := model.ParseLineID(chi.URLParam(r, "lineID"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	lastSeq, err := s.plant.RecoverLine(r.Context(), lineID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"line_id": lineID, "last_event_seq": lastSeq})
+}

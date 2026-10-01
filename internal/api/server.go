@@ -47,6 +47,7 @@ func (s *Server) routes() http.Handler {
 		api.Get("/process-lines", s.processLines)
 		api.Post("/process-lines/{lineID}/batches", s.startBatch)
 		api.Post("/process-lines/{lineID}/advance", s.advanceBatch)
+		api.Post("/process-lines/{lineID}/recover", s.recoverLine)
 		api.Get("/process-lines/{lineID}", s.lineStatus)
 		api.Get("/aeration", s.aerationStatus)
 		api.Post("/aeration/{lineID}/{basinID}/samples", s.aerationSample)

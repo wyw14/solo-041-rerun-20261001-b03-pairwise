@@ -70,6 +70,22 @@ func (s *FileStore) Events(ctx context.Context, lineID model.LineID) ([]model.Ev
 	return events, nil
 }
 
+// EventsAfter returns committed events with a sequence strictly greater than
+// after, which is what replay needs once a snapshot at `after` is installed.
+func (s *FileStore) EventsAfter(ctx context.Context, lineID model.LineID, after uint64) ([]model.Event, error) {
+	events, err := s.Events(ctx, lineID)
+	if err != nil {
+		return nil, err
+	}
+	remaining := make([]model.Event, 0, len(events))
+	for _, event := range events {
+		if event.Sequence > after {
+			remaining = append(remaining, event)
+		}
+	}
+	return remaining, nil
+}
+
 func (s *FileStore) loadSequences() error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {

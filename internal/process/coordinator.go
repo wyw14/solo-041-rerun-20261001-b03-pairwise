@@ -25,6 +25,7 @@ import (
 
 type Plant struct {
 	mu            sync.RWMutex
+	recoveryMu    sync.RWMutex
 	now           func() time.Time
 	lines         map[model.LineID]model.LineState
 	batches       map[uuid.UUID]model.Batch
@@ -170,34 +171,69 @@ func NewPlant(dataDir string, lines []model.LineID, now func() time.Time) (*Plan
 }
 
 func (p *Plant) StartBatch(ctx context.Context, lineID model.LineID, flow float64, source string) (model.Batch, error) {
+	// Recovery takes the write side of this lock; holding the read side here
+	// keeps a batch start from interleaving with a replay.
+	p.recoveryMu.RLock()
+	defer p.recoveryMu.RUnlock()
 	now := p.now()
-	if _, err := p.intake.Admit(ctx, lineID, flow, source, now); err != nil {
-		return model.Batch{}, err
+	p.mu.RLock()
+	state, configured := p.lines[lineID]
+	if configured {
+		if existingID, ok := p.lineBatches[lineID]; ok && p.batches[existingID].IsActive() {
+			p.mu.RUnlock()
+			return model.Batch{}, errors.New("process line already has an active batch")
+		}
 	}
-	p.mu.Lock()
-	if existingID, ok := p.lineBatches[lineID]; ok && p.batches[existingID].IsActive() {
-		p.mu.Unlock()
-		return model.Batch{}, errors.New("process line already has an active batch")
+	p.mu.RUnlock()
+	if !configured {
+		return model.Batch{}, errors.New("process line is not found")
 	}
-	batch := model.NewBatch(lineID, now)
-	p.batches[batch.ID] = batch
-	p.lineBatches[lineID] = batch.ID
-	state := p.lines[lineID]
-	state.BatchID = batch.ID.String()
-	state.UpdatedAt = now.UTC()
-	p.lines[lineID] = state
-	p.mu.Unlock()
-	event, err := model.NewEvent(lineID, batch.Generation, model.EventBatchCreated, batch, now)
+	if state.Emergency {
+		return model.Batch{}, errors.New("process line is isolated and cannot start a batch")
+	}
+	admission, err := p.intake.Admit(ctx, lineID, flow, source, now)
 	if err != nil {
 		return model.Batch{}, err
 	}
-	if _, err := p.store.Append(ctx, event); err != nil {
+	p.mu.Lock()
+	batch := model.NewBatch(lineID, now)
+	batch.Generation = state.Generation
+	payload := model.BatchCreated{
+		Batch: batch,
+		Admission: model.IntakeAdmission{
+			FlowM3Hour: admission.FlowM3Hour, Source: admission.Source,
+			EqualizerID: admission.EqualizerID,
+		},
+	}
+	p.mu.Unlock()
+
+	event, err := model.NewEvent(lineID, batch.Generation, model.EventBatchCreated, payload, now)
+	if err != nil {
+		p.releaseIntake(lineID)
 		return model.Batch{}, err
 	}
+	persisted, err := p.store.Append(ctx, event)
+	if err != nil {
+		p.releaseIntake(lineID)
+		return model.Batch{}, err
+	}
+
+	p.mu.Lock()
+	p.batches[batch.ID] = batch
+	p.lineBatches[lineID] = batch.ID
+	state = p.lines[lineID]
+	state.BatchID = batch.ID.String()
+	state.Stage = batch.Stage
+	state.LastEventSeq = persisted.Sequence
+	state.UpdatedAt = now.UTC()
+	p.lines[lineID] = state
+	p.mu.Unlock()
 	return batch, nil
 }
 
 func (p *Plant) AdvanceBatch(ctx context.Context, lineID model.LineID, next model.ProcessStage) (model.Batch, error) {
+	p.recoveryMu.RLock()
+	defer p.recoveryMu.RUnlock()
 	batch, ok := p.ActiveBatch(lineID)
 	if !ok {
 		return model.Batch{}, errors.New("process line has no active batch")
@@ -211,17 +247,29 @@ func (p *Plant) AdvanceBatch(ctx context.Context, lineID model.LineID, next mode
 	if err != nil {
 		return model.Batch{}, err
 	}
-	if _, err := p.store.Append(ctx, event); err != nil {
+	persisted, err := p.store.Append(ctx, event)
+	if err != nil {
 		return model.Batch{}, err
 	}
 	p.mu.Lock()
 	p.batches[updated.ID] = updated
 	state := p.lines[lineID]
 	state.Stage = updated.Stage
+	state.LastEventSeq = persisted.Sequence
 	state.UpdatedAt = now.UTC()
 	p.lines[lineID] = state
 	p.mu.Unlock()
+	// A terminal batch no longer holds intake resources.
+	if !updated.IsActive() {
+		p.releaseIntake(lineID)
+	}
 	return updated, nil
+}
+
+// releaseIntake drops a line's cached admission and equalizer assignment.
+func (p *Plant) releaseIntake(lineID model.LineID) {
+	p.intake.Clear(lineID)
+	p.equalizers.Release(lineID)
 }
 
 func (p *Plant) Lines() []model.LineState {

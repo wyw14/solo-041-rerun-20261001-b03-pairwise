@@ -79,6 +79,20 @@ func (p *EqualizationPool) Release(lineID model.LineID) {
 	}
 }
 
+func (p *EqualizationPool) Restore(basinID string, lineID model.LineID, flow float64, at time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	basin, ok := p.basins[basinID]
+	if !ok {
+		return errors.New("equalizer is not configured")
+	}
+	basin.LineID = lineID
+	basin.AssignedFlow = flow
+	basin.AssignedAt = at.UTC()
+	p.basins[basinID] = basin
+	return nil
+}
+
 func (p *EqualizationPool) Snapshot() []Equalizer {
 	p.mu.Lock()
 	defer p.mu.Unlock()

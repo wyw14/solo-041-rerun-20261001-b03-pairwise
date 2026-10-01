@@ -17,6 +17,8 @@ func (p *Plant) EmergencyStop(ctx context.Context, lineID model.LineID, reason s
 	if reason == "" {
 		return model.LineState{}, errors.New("emergency reason is required")
 	}
+	p.recoveryMu.RLock()
+	defer p.recoveryMu.RUnlock()
 	p.mu.RLock()
 	state, ok := p.lines[lineID]
 	p.mu.RUnlock()
@@ -36,11 +38,17 @@ func (p *Plant) EmergencyStop(ctx context.Context, lineID model.LineID, reason s
 	p.mu.Lock()
 	state = p.lines[lineID].Isolate(persisted.Sequence, now)
 	p.lines[lineID] = state
+	if batchID, hasBatch := p.lineBatches[lineID]; hasBatch {
+		batch := p.batches[batchID]
+		batch.Stage = model.StageIsolated
+		batch.UpdatedAt = now
+		p.batches[batchID] = batch
+	}
 	p.mu.Unlock()
 	p.devices.StopLine(lineID, state.Generation)
-	p.equalizers.Release(lineID)
+	p.releaseIntake(lineID)
 	p.alarms.Raise(model.NewAlarm(lineID, "PROCESS_EMERGENCY", reason, model.SeverityCritical, now))
-	if err := p.snapshots.Save(state); err != nil {
+	if err := p.persistLineSnapshot(lineID); err != nil {
 		return model.LineState{}, err
 	}
 	return state, nil

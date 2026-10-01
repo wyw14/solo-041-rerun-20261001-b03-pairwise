@@ -53,3 +53,41 @@ func (l *Ledger) Latest(batchID uuid.UUID) (Change, bool) {
 	}
 	return values[len(values)-1], true
 }
+
+// Replay rebuilds the ledger from committed dosing changes. Later changes for
+// the same change id replace the earlier entry so replay is idempotent.
+func (l *Ledger) Replay(change Change) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	values := l.changes[change.BatchID]
+	for index, existing := range values {
+		if existing.ID == change.ID {
+			values[index] = change
+			l.changes[change.BatchID] = values
+			return
+		}
+	}
+	l.changes[change.BatchID] = append(values, change)
+}
+
+// History returns the committed changes for a batch in request order.
+func (l *Ledger) History(batchID uuid.UUID) []Change {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	values := l.changes[batchID]
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]Change(nil), values...)
+}
+
+// ResetLine drops every dosing change recorded against batches of the line.
+func (l *Ledger) ResetLine(lineID model.LineID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for batchID, values := range l.changes {
+		if len(values) > 0 && values[0].LineID == lineID {
+			delete(l.changes, batchID)
+		}
+	}
+}
